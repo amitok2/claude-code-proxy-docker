@@ -1148,7 +1148,7 @@ async def create_message(
         # Handle Gemini conversation limits
         # Note: Gemini should support 50+ turns, but if you're seeing 10-turn cutoffs,
         # this might be due to LiteLLM, API client, or other middleware limits
-        if anthropic_request.model.startswith("gemini/"):
+        if request.model.startswith("gemini/"):
             if len(litellm_request['messages']) > 10:
                 logger.info(f"🔄 GEMINI LONG CONVERSATION: {len(litellm_request['messages'])} messages (testing 10+ turn limit)")
             
@@ -1156,7 +1156,7 @@ async def create_message(
                 logger.warning(f"⚠️ APPROACHING GEMINI TURN LIMIT: {len(litellm_request['messages'])}/{GEMINI_MAX_TURNS} messages")
                 
             # Log the exact model being used to help debug turn limits
-            logger.debug(f"🤖 GEMINI MODEL: {anthropic_request.model} with {len(litellm_request['messages'])} messages")
+            logger.debug(f"🤖 GEMINI MODEL: {request.model} with {len(litellm_request['messages'])} messages")
         
         # Determine which API key to use based on the model
         if request.model.startswith("openai/"):
