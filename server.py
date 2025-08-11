@@ -20,7 +20,7 @@ load_dotenv()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.WARN,  # Change to INFO level to show more details
+    level=logging.DEBUG,  # Enable debug logging to see conversation details
     format='%(asctime)s - %(levelname)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
@@ -545,6 +545,12 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
         "temperature": anthropic_request.temperature,
         "stream": anthropic_request.stream,
     }
+    
+    # Add conversation-specific parameters for Gemini models
+    if anthropic_request.model.startswith("gemini/"):
+        # Try to override Gemini's default turn limits
+        litellm_request["max_output_tokens"] = max_tokens
+        # Note: Gemini may still enforce its own conversation limits
     
     # Add optional parameters if present
     if anthropic_request.stop_sequences:
@@ -1098,10 +1104,13 @@ async def create_message(
         elif clean_model.startswith("openai/"):
             clean_model = clean_model[len("openai/"):]
         
-        logger.debug(f"📊 PROCESSING REQUEST: Model={request.model}, Stream={request.stream}")
+        logger.debug(f"📊 PROCESSING REQUEST: Model={request.model}, Stream={request.stream}, Messages={len(request.messages)}")
         
         # Convert Anthropic request to LiteLLM format
         litellm_request = convert_anthropic_to_litellm(request)
+        
+        # Log conversation length for debugging turn limits
+        logger.debug(f"🔄 CONVERSATION LENGTH: {len(litellm_request['messages'])} messages total")
         
         # Determine which API key to use based on the model
         if request.model.startswith("openai/"):
