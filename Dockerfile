@@ -31,11 +31,11 @@ RUN useradd --create-home --shell /bin/bash appuser && \
 USER appuser
 
 # Expose port
-EXPOSE 8082
+EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
-    CMD python -c "import httpx; httpx.get('http://localhost:8082/')"
+    CMD python -c "import httpx; httpx.get('http://localhost:8080/')"
 
 # Run the application
-CMD ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8082"]
+CMD ["python", "-m", "uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -1458,8 +1458,8 @@ def log_request_beautifully(method, path, claude_model, openai_model, num_messag
 if __name__ == "__main__":
     import sys
     if len(sys.argv) > 1 and sys.argv[1] == "--help":
-        print("Run with: uvicorn server:app --reload --host 0.0.0.0 --port 8082")
+        print("Run with: uvicorn server:app --reload --host 0.0.0.0 --port 8080")
         sys.exit(0)
     
     # Configure uvicorn to run with minimal logs
-    uvicorn.run(app, host="0.0.0.0", port=8082, log_level="error")
+    uvicorn.run(app, host="0.0.0.0", port=8080, log_level="error")

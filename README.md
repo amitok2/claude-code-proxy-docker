@@ -50,7 +50,7 @@ SMALL_MODEL=gpt-4o-mini    # Model for Claude Haiku requests
 docker-compose up -d
 ```
 
-The proxy will be available at `http://localhost:8082`
+The proxy will be available at `http://localhost:8080`
 
 ### 4. Use with Claude Code
 
@@ -61,7 +61,7 @@ npm install -g @anthropic-ai/claude-code
 
 Connect to your proxy:
 ```bash
-ANTHROPIC_BASE_URL=http://localhost:8082 claude
+ANTHROPIC_BASE_URL=http://localhost:8080 claude
 ```
 
 ## Alternative Deployment Methods 🛠️
@@ -75,7 +75,7 @@ docker build -t claude-code-proxy .
 # Run the container
 docker run -d \
   --name claude-code-proxy \
-  -p 8082:8082 \
+  -p 8080:8080 \
   -e OPENAI_API_KEY=your-openai-api-key \
   -e GEMINI_API_KEY=your-gemini-api-key \
   -e PREFERRED_PROVIDER=openai \
@@ -93,7 +93,7 @@ cp env.example .env
 # Edit .env with your API keys
 
 # Run the server
-python -m uvicorn server:app --host 0.0.0.0 --port 8082 --reload
+python -m uvicorn server:app --host 0.0.0.0 --port 8080 --reload
 ```
 
 ## Configuration 📝
@@ -153,7 +153,7 @@ docker-compose logs -f claude-code-proxy
 
 Check if the proxy is running:
 ```bash
-curl http://localhost:8082/
+curl http://localhost:8080/
 ```
 
 ## Troubleshooting 🔧
@@ -162,7 +162,7 @@ curl http://localhost:8082/
 
 1. **Container won't start**
    - Check your `.env` file has valid API keys
-   - Ensure port 8082 is not already in use
+   - Ensure port 8080 is not already in use
 
 2. **API key errors**
    - Verify your API keys are correct and have sufficient credits
@@ -170,7 +170,7 @@ curl http://localhost:8082/
 
 3. **Connection refused**
    - Make sure Docker container is running: `docker ps`
-   - Check port mapping: `-p 8082:8082`
+   - Check port mapping: `-p 8080:8080`
 
 ### Debug Mode
 
