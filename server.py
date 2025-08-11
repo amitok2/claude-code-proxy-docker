@@ -90,6 +90,10 @@ PREFERRED_PROVIDER = os.environ.get("PREFERRED_PROVIDER", "openai").lower()
 BIG_MODEL = os.environ.get("BIG_MODEL", "gpt-4.1")
 SMALL_MODEL = os.environ.get("SMALL_MODEL", "gpt-4.1-mini")
 
+# Gemini conversation limits configuration
+GEMINI_TURN_WARNING_THRESHOLD = int(os.environ.get("GEMINI_TURN_WARNING_THRESHOLD", "8"))
+GEMINI_MAX_TURNS = int(os.environ.get("GEMINI_MAX_TURNS", "10"))
+
 # List of OpenAI models
 OPENAI_MODELS = [
     "o3-mini",
@@ -1111,6 +1115,13 @@ async def create_message(
         
         # Log conversation length for debugging turn limits
         logger.debug(f"🔄 CONVERSATION LENGTH: {len(litellm_request['messages'])} messages total")
+        
+        # Handle Gemini conversation limits (typically 10-20 turns)
+        if anthropic_request.model.startswith("gemini/") and len(litellm_request['messages']) > GEMINI_TURN_WARNING_THRESHOLD:
+            logger.warning(f"⚠️ APPROACHING GEMINI TURN LIMIT: {len(litellm_request['messages'])}/{GEMINI_MAX_TURNS} messages - consider conversation reset")
+            
+            # Option: Implement conversation summarization here
+            # For now, just warn the user about the upcoming limit
         
         # Determine which API key to use based on the model
         if request.model.startswith("openai/"):
