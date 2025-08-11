@@ -545,6 +545,25 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
     
     if anthropic_request.top_k:
         litellm_request["top_k"] = anthropic_request.top_k
+
+    # Sanitize unsupported params for OpenAI gpt-5 models
+    try:
+        target_model = litellm_request.get("model", "")
+        if isinstance(target_model, str) and (target_model == "gpt-5" or target_model.endswith("/gpt-5") or "gpt-5" in target_model):
+            # gpt-5 only supports temperature=1; force it and drop conflicting params
+            litellm_request["temperature"] = 1
+            for unsupported in [
+                "top_p",
+                "top_k",
+                "frequency_penalty",
+                "presence_penalty",
+                "seed",
+                "response_format",
+            ]:
+                if unsupported in litellm_request:
+                    del litellm_request[unsupported]
+    except Exception:
+        pass
     
     # Convert tools to OpenAI format
     if anthropic_request.tools:
