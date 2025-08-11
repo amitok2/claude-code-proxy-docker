@@ -554,9 +554,36 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
     
     # Add conversation-specific parameters for Gemini models
     if anthropic_request.model.startswith("gemini/"):
-        # Try to override Gemini's default turn limits
+        # Try to override Gemini's default turn limits with additional parameters
         litellm_request["max_output_tokens"] = max_tokens
-        # Note: Gemini may still enforce its own conversation limits
+        
+        # Add Gemini-specific generation config parameters
+        litellm_request["generation_config"] = {
+            "max_output_tokens": max_tokens,
+            "candidate_count": 1,
+        }
+        
+        # Add safety settings to potentially avoid restrictions
+        litellm_request["safety_settings"] = [
+            {
+                "category": "HARM_CATEGORY_HARASSMENT",
+                "threshold": "BLOCK_ONLY_HIGH"
+            },
+            {
+                "category": "HARM_CATEGORY_HATE_SPEECH", 
+                "threshold": "BLOCK_ONLY_HIGH"
+            },
+            {
+                "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                "threshold": "BLOCK_ONLY_HIGH"
+            },
+            {
+                "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
+                "threshold": "BLOCK_ONLY_HIGH"
+            }
+        ]
+        
+        # Note: These parameters may help with conversation limits
     
     # Add optional parameters if present
     if anthropic_request.stop_sequences:
@@ -1280,8 +1307,12 @@ async def create_message(
                     logger.warning(f"Message {i} has None content - replacing with placeholder")
                     litellm_request["messages"][i]["content"] = "..." # Fallback placeholder
         
-        # Only log basic info about the request, not the full details
+        # Log detailed request info for debugging turn limits
         logger.debug(f"Request for model: {litellm_request.get('model')}, stream: {litellm_request.get('stream', False)}")
+        
+        # Log full LiteLLM request structure for debugging (without API keys)
+        debug_request = {k: v for k, v in litellm_request.items() if k != "api_key"}
+        logger.debug(f"🔧 FULL LITELLM REQUEST: {json.dumps(debug_request, indent=2, default=str)}")
         
         # Handle streaming mode
         if request.stream:
