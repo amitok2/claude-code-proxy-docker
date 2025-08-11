@@ -20,7 +20,7 @@ load_dotenv()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.DEBUG,  # Enable debug logging to see conversation details
+    level=logging.WARNING,  # Only show warnings and errors
     format='%(asctime)s - %(levelname)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
@@ -54,26 +54,7 @@ class MessageFilter(logging.Filter):
 root_logger = logging.getLogger()
 root_logger.addFilter(MessageFilter())
 
-# Custom formatter for model mapping logs
-class ColorizedFormatter(logging.Formatter):
-    """Custom formatter to highlight model mappings"""
-    BLUE = "\033[94m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    RED = "\033[91m"
-    RESET = "\033[0m"
-    BOLD = "\033[1m"
-    
-    def format(self, record):
-        if record.levelno == logging.debug and "MODEL MAPPING" in record.msg:
-            # Apply colors and formatting to model mapping logs
-            return f"{self.BOLD}{self.GREEN}{record.msg}{self.RESET}"
-        return super().format(record)
 
-# Apply custom formatter to console handler
-for handler in logger.handlers:
-    if isinstance(handler, logging.StreamHandler):
-        handler.setFormatter(ColorizedFormatter('%(asctime)s - %(levelname)s - %(message)s'))
 
 app = FastAPI()
 
@@ -130,7 +111,6 @@ def clean_gemini_schema(schema: Any) -> Any:
         if schema.get("type") == "string" and "format" in schema:
             allowed_formats = {"enum", "date-time"}
             if schema["format"] not in allowed_formats:
-                logger.debug(f"Removing unsupported format '{schema['format']}' for string type in Gemini schema.")
                 schema.pop("format")
 
         # Recursively clean nested schemas (properties, items, etc.)
@@ -198,8 +178,6 @@ class MessagesRequest(BaseModel):
         original_model = v
         new_model = v # Default to original value
 
-        logger.debug(f"📋 MODEL VALIDATION: Original='{original_model}', Preferred='{PREFERRED_PROVIDER}', BIG='{BIG_MODEL}', SMALL='{SMALL_MODEL}'")
-
         # Remove provider prefixes for easier matching
         clean_v = v
         if clean_v.startswith('anthropic/'):
@@ -238,14 +216,6 @@ class MessagesRequest(BaseModel):
                 new_model = f"openai/{clean_v}"
                 mapped = True # Technically mapped to add prefix
         # --- Mapping Logic --- END ---
-
-        if mapped:
-            logger.debug(f"📌 MODEL MAPPING: '{original_model}' ➡️ '{new_model}'")
-        else:
-             # If no mapping occurred and no prefix exists, log warning or decide default
-             if not v.startswith(('openai/', 'gemini/', 'anthropic/')):
-                 logger.warning(f"⚠️ No prefix or mapping rule for model: '{original_model}'. Using as is.")
-             new_model = v # Ensure we return the original if no rule applied
 
         # Store the original model in the values dictionary
         values = info.data
@@ -266,12 +236,8 @@ class TokenCountRequest(BaseModel):
     @field_validator('model')
     def validate_model_token_count(cls, v, info): # Renamed to avoid conflict
         # Use the same logic as MessagesRequest validator
-        # NOTE: Pydantic validators might not share state easily if not class methods
-        # Re-implementing the logic here for clarity, could be refactored
         original_model = v
         new_model = v # Default to original value
-
-        logger.debug(f"📋 TOKEN COUNT VALIDATION: Original='{original_model}', Preferred='{PREFERRED_PROVIDER}', BIG='{BIG_MODEL}', SMALL='{SMALL_MODEL}'")
 
         # Remove provider prefixes for easier matching
         clean_v = v
@@ -311,13 +277,6 @@ class TokenCountRequest(BaseModel):
                 new_model = f"openai/{clean_v}"
                 mapped = True # Technically mapped to add prefix
         # --- Mapping Logic --- END ---
-
-        if mapped:
-            logger.debug(f"📌 TOKEN COUNT MAPPING: '{original_model}' ➡️ '{new_model}'")
-        else:
-             if not v.startswith(('openai/', 'gemini/', 'anthropic/')):
-                 logger.warning(f"⚠️ No prefix or mapping rule for token count model: '{original_model}'. Using as is.")
-             new_model = v # Ensure we return the original if no rule applied
 
         # Store the original model in the values dictionary
         values = info.data
@@ -347,16 +306,8 @@ class MessagesResponse(BaseModel):
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    # Get request details
-    method = request.method
-    path = request.url.path
-    
-    # Log only basic request details at debug level
-    logger.debug(f"Request: {method} {path}")
-    
     # Process the request and get the response
     response = await call_next(request)
-    
     return response
 
 # Not using validation function as we're using the environment API key
@@ -541,7 +492,6 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
     max_tokens = anthropic_request.max_tokens
     if anthropic_request.model.startswith("openai/") or anthropic_request.model.startswith("gemini/"):
         max_tokens = min(max_tokens, 16384)
-        logger.debug(f"Capping max_tokens to 16384 for OpenAI/Gemini model (original value: {anthropic_request.max_tokens})")
     
     # Create LiteLLM request dict
     litellm_request = {
@@ -615,7 +565,6 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
             # Clean the schema if targeting a Gemini model
             input_schema = tool_dict.get("input_schema", {})
             if is_gemini_model:
-                 logger.debug(f"Cleaning schema for Gemini tool: {tool_dict.get('name')}")
                  input_schema = clean_gemini_schema(input_schema)
 
             # Create OpenAI-compatible function tool
@@ -716,15 +665,11 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
         
         # Add tool calls if present (tool_use in Anthropic format) - only for Claude models
         if tool_calls and is_claude_model:
-            logger.debug(f"Processing tool calls: {tool_calls}")
-            
             # Convert to list if it's not already
             if not isinstance(tool_calls, list):
                 tool_calls = [tool_calls]
                 
             for idx, tool_call in enumerate(tool_calls):
-                logger.debug(f"Processing tool call {idx}: {tool_call}")
-                
                 # Extract function data based on whether it's a dict or object
                 if isinstance(tool_call, dict):
                     function = tool_call.get("function", {})
@@ -742,10 +687,7 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
                     try:
                         arguments = json.loads(arguments)
                     except json.JSONDecodeError:
-                        logger.warning(f"Failed to parse tool arguments as JSON: {arguments}")
                         arguments = {"raw": arguments}
-                
-                logger.debug(f"Adding tool_use block: id={tool_id}, name={name}, input={arguments}")
                 
                 content.append({
                     "type": "tool_use",
@@ -755,7 +697,6 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
                 })
         elif tool_calls and not is_claude_model:
             # For non-Claude models, convert tool calls to text format
-            logger.debug(f"Converting tool calls to text for non-Claude model: {clean_model}")
             
             # We'll append tool info to the text content
             tool_text = "\n\nTool usage:\n"
@@ -1137,41 +1078,19 @@ async def create_message(
         elif clean_model.startswith("openai/"):
             clean_model = clean_model[len("openai/"):]
         
-        logger.debug(f"📊 PROCESSING REQUEST: Model={request.model}, Stream={request.stream}, Messages={len(request.messages)}")
-        
         # Convert Anthropic request to LiteLLM format
         litellm_request = convert_anthropic_to_litellm(request)
-        
-        # Log conversation length for debugging turn limits
-        logger.debug(f"🔄 CONVERSATION LENGTH: {len(litellm_request['messages'])} messages total")
-        
-        # Handle Gemini conversation limits
-        # Note: Gemini should support 50+ turns, but if you're seeing 10-turn cutoffs,
-        # this might be due to LiteLLM, API client, or other middleware limits
-        if request.model.startswith("gemini/"):
-            if len(litellm_request['messages']) > 10:
-                logger.info(f"🔄 GEMINI LONG CONVERSATION: {len(litellm_request['messages'])} messages (testing 10+ turn limit)")
-            
-            if len(litellm_request['messages']) > GEMINI_TURN_WARNING_THRESHOLD:
-                logger.warning(f"⚠️ APPROACHING GEMINI TURN LIMIT: {len(litellm_request['messages'])}/{GEMINI_MAX_TURNS} messages")
-                
-            # Log the exact model being used to help debug turn limits
-            logger.debug(f"🤖 GEMINI MODEL: {request.model} with {len(litellm_request['messages'])} messages")
         
         # Determine which API key to use based on the model
         if request.model.startswith("openai/"):
             litellm_request["api_key"] = OPENAI_API_KEY
-            logger.debug(f"Using OpenAI API key for model: {request.model}")
         elif request.model.startswith("gemini/"):
             litellm_request["api_key"] = GEMINI_API_KEY
-            logger.debug(f"Using Gemini API key for model: {request.model}")
         else:
             litellm_request["api_key"] = ANTHROPIC_API_KEY
-            logger.debug(f"Using Anthropic API key for model: {request.model}")
         
         # For OpenAI models - modify request format to work with limitations
         if "openai" in litellm_request["model"] and "messages" in litellm_request:
-            logger.debug(f"Processing OpenAI model request: {litellm_request['model']}")
             
             # For OpenAI models, we need to convert content blocks to simple strings
             # and handle other requirements
@@ -1186,7 +1105,6 @@ async def create_message(
                             break
                     
                     if is_only_tool_result and len(msg["content"]) > 0:
-                        logger.warning(f"Found message with only tool_result content - special handling required")
                         # Extract the content from all tool_result blocks
                         all_text = ""
                         for block in msg["content"]:
@@ -1215,7 +1133,6 @@ async def create_message(
                         
                         # Replace the list with extracted text
                         litellm_request["messages"][i]["content"] = all_text.strip() or "..."
-                        logger.warning(f"Converted tool_result to plain text: {all_text.strip()[:200]}...")
                         continue  # Skip normal processing for this message
                 
                 # 1. Handle content field - normal case
@@ -1290,29 +1207,16 @@ async def create_message(
                 # 2. Remove any fields OpenAI doesn't support in messages
                 for key in list(msg.keys()):
                     if key not in ["role", "content", "name", "tool_call_id", "tool_calls"]:
-                        logger.warning(f"Removing unsupported field from message: {key}")
                         del msg[key]
             
-            # 3. Final validation - check for any remaining invalid values and dump full message details
+            # 3. Final validation - check for any remaining invalid values
             for i, msg in enumerate(litellm_request["messages"]):
-                # Log the message format for debugging
-                logger.debug(f"Message {i} format check - role: {msg.get('role')}, content type: {type(msg.get('content'))}")
-                
                 # If content is still a list or None, replace with placeholder
                 if isinstance(msg.get("content"), list):
-                    logger.warning(f"CRITICAL: Message {i} still has list content after processing: {json.dumps(msg.get('content'))}")
                     # Last resort - stringify the entire content as JSON
                     litellm_request["messages"][i]["content"] = f"Content as JSON: {json.dumps(msg.get('content'))}"
                 elif msg.get("content") is None:
-                    logger.warning(f"Message {i} has None content - replacing with placeholder")
                     litellm_request["messages"][i]["content"] = "..." # Fallback placeholder
-        
-        # Log detailed request info for debugging turn limits
-        logger.debug(f"Request for model: {litellm_request.get('model')}, stream: {litellm_request.get('stream', False)}")
-        
-        # Log full LiteLLM request structure for debugging (without API keys)
-        debug_request = {k: v for k, v in litellm_request.items() if k != "api_key"}
-        logger.debug(f"🔧 FULL LITELLM REQUEST: {json.dumps(debug_request, indent=2, default=str)}")
         
         # Handle streaming mode
         if request.stream:
@@ -1348,9 +1252,7 @@ async def create_message(
                 num_tools,
                 200  # Assuming success at this point
             )
-            start_time = time.time()
             litellm_response = litellm.completion(**litellm_request)
-            logger.debug(f"✅ RESPONSE RECEIVED: Model={litellm_request.get('model')}, Time={time.time() - start_time:.2f}s")
             
             # Convert LiteLLM response to Anthropic format
             anthropic_response = convert_litellm_to_anthropic(litellm_response, request)
@@ -1381,13 +1283,6 @@ async def create_message(
         
         # Log all error details
         logger.error(f"Error processing request: {json.dumps(error_details, indent=2)}")
-        
-        # Check if this is related to conversation turn limits
-        error_str = str(e).lower()
-        if any(keyword in error_str for keyword in ['turn', 'conversation', 'history', 'limit', 'maximum']):
-            logger.error(f"🚨 POTENTIAL TURN LIMIT ERROR: This might be the 10-turn limit issue!")
-            logger.error(f"Model: {request.model if 'request' in locals() else 'unknown'}")
-            logger.error(f"Message count: {len(request.messages) if 'request' in locals() and hasattr(request, 'messages') else 'unknown'}")
         
         # Format error for response
         error_message = f"Error: {str(e)}"
@@ -1489,37 +1384,8 @@ class Colors:
     UNDERLINE = "\033[4m"
     DIM = "\033[2m"
 def log_request_beautifully(method, path, claude_model, openai_model, num_messages, num_tools, status_code):
-    """Log requests in a beautiful, twitter-friendly format showing Claude to OpenAI mapping."""
-    # Format the Claude model name nicely
-    claude_display = f"{Colors.CYAN}{claude_model}{Colors.RESET}"
-    
-    # Extract endpoint name
-    endpoint = path
-    if "?" in endpoint:
-        endpoint = endpoint.split("?")[0]
-    
-    # Extract just the OpenAI model name without provider prefix
-    openai_display = openai_model
-    if "/" in openai_display:
-        openai_display = openai_display.split("/")[-1]
-    openai_display = f"{Colors.GREEN}{openai_display}{Colors.RESET}"
-    
-    # Format tools and messages
-    tools_str = f"{Colors.MAGENTA}{num_tools} tools{Colors.RESET}"
-    messages_str = f"{Colors.BLUE}{num_messages} messages{Colors.RESET}"
-    
-    # Format status code
-    status_str = f"{Colors.GREEN}✓ {status_code} OK{Colors.RESET}" if status_code == 200 else f"{Colors.RED}✗ {status_code}{Colors.RESET}"
-    
-
-    # Put it all together in a clear, beautiful format
-    log_line = f"{Colors.BOLD}{method} {endpoint}{Colors.RESET} {status_str}"
-    model_line = f"{claude_display} → {openai_display} {tools_str} {messages_str}"
-    
-    # Print to console
-    print(log_line)
-    print(model_line)
-    sys.stdout.flush()
+    """Log requests in a simple format."""
+    pass  # Disabled for performance
 
 if __name__ == "__main__":
     import sys
