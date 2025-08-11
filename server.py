@@ -83,6 +83,7 @@ OPENAI_MODELS = [
     "o1",
     "o1-mini",
     "o1-pro",
+    "gpt-5",  # Added to support BIG_MODEL=gpt-5
     "gpt-4.5-preview",
     "gpt-4o",
     "gpt-4o-audio-preview",
@@ -1282,7 +1283,7 @@ async def create_message(
                     error_details[key] = str(value)
         
         # Log all error details
-        logger.error(f"Error processing request: {json.dumps(error_details, indent=2)}")
+        logger.error(f"Error processing request: {json.dumps(error_details, indent=2, default=str)}")
         
         # Format error for response
         error_message = f"Error: {str(e)}"
