@@ -22,7 +22,7 @@ load_dotenv()
 
 # Configure logging
 logging.basicConfig(
-    level=logging.WARNING,  # Only show warnings and errors
+    level=logging.INFO,  # Show info, warnings and errors to see request logs
     format='%(asctime)s - %(levelname)s - %(message)s',
 )
 logger = logging.getLogger(__name__)
@@ -119,6 +119,7 @@ def clean_gemini_schema(schema: Any) -> Any:
     
     if isinstance(schema, dict):
         # Remove specific keys unsupported by Gemini tool parameters
+        # Based on Gemini API errors, these fields are not supported in Schema objects
         schema.pop("additionalProperties", None)
         schema.pop("default", None)
         schema.pop("$schema", None)  # Remove $schema field that causes "Unknown field for Schema" error
@@ -131,6 +132,10 @@ def clean_gemini_schema(schema: Any) -> Any:
         schema.pop("maximum", None)    # Remove maximum field (also likely unsupported)
         schema.pop("multipleOf", None) # Remove multipleOf field (also likely unsupported)
         schema.pop("uniqueItems", None) # Remove uniqueItems field (also likely unsupported)
+        schema.pop("title", None)      # Remove title field that causes "Unknown field for Schema" error
+        schema.pop("examples", None)   # Remove examples field (also likely unsupported)
+        schema.pop("const", None)      # Remove const field (also likely unsupported)
+        # Keep enum as it might be supported, keep description at property level
 
         # Check for unsupported 'format' in string types
         if schema.get("type") == "string" and "format" in schema:
@@ -1125,12 +1130,55 @@ async def create_message(
     raw_request: Request
 ):
     try:
-        # print the body here
+        # Get the raw request body for logging
         body = await raw_request.body()
     
         # Parse the raw body as JSON since it's bytes
         body_json = json.loads(body.decode('utf-8'))
         original_model = body_json.get("model", "unknown")
+        
+        # Log incoming request details
+        client_ip = raw_request.client.host if raw_request.client else "unknown"
+        user_agent = raw_request.headers.get("user-agent", "unknown")
+        content_length = len(body)
+        
+        logger.info(f"📥 INCOMING REQUEST:")
+        logger.info(f"   IP: {client_ip}")
+        logger.info(f"   User-Agent: {user_agent}")
+        logger.info(f"   Model: {original_model} → {request.model}")
+        logger.info(f"   Messages: {len(request.messages)}")
+        logger.info(f"   Tools: {len(request.tools) if request.tools else 0}")
+        logger.info(f"   Max Tokens: {request.max_tokens}")
+        logger.info(f"   Stream: {request.stream}")
+        logger.info(f"   Content Length: {content_length} bytes")
+        
+        # Log system message if present
+        if request.system:
+            sys_preview = str(request.system)[:100] + "..." if len(str(request.system)) > 100 else str(request.system)
+            logger.info(f"   System: {sys_preview}")
+        
+        # Log first user message preview
+        if request.messages and len(request.messages) > 0:
+            first_msg = request.messages[0]
+            if isinstance(first_msg.content, str):
+                msg_preview = first_msg.content[:100] + "..." if len(first_msg.content) > 100 else first_msg.content
+            else:
+                # For content blocks, try to extract text
+                text_parts = []
+                for block in first_msg.content:
+                    if hasattr(block, 'type') and block.type == 'text':
+                        text_parts.append(block.text)
+                msg_preview = " ".join(text_parts)[:100] + "..." if len(" ".join(text_parts)) > 100 else " ".join(text_parts)
+            logger.info(f"   First Message: {msg_preview}")
+        
+        # Log tool names if present
+        if request.tools:
+            tool_names = [tool.name for tool in request.tools]
+            logger.info(f"   Tool Names: {', '.join(tool_names)}")
+        
+        # Log raw request body
+        logger.info(f"📄 RAW REQUEST:")
+        logger.info(body.decode('utf-8'))
         
         # Get the display name for logging, just the model name without provider prefix
         display_model = original_model
@@ -1322,6 +1370,15 @@ async def create_message(
                 
 
                 anthropic_response = convert_openai_to_anthropic(resp, request)
+                
+                # Log successful response
+                logger.info(f"✅ RESPONSE SENT:")
+                logger.info(f"   Model: {anthropic_response.model}")
+                logger.info(f"   Content Blocks: {len(anthropic_response.content)}")
+                logger.info(f"   Stop Reason: {anthropic_response.stop_reason}")
+                logger.info(f"   Input Tokens: {anthropic_response.usage.input_tokens}")
+                logger.info(f"   Output Tokens: {anthropic_response.usage.output_tokens}")
+                
                 return anthropic_response
 
         elif request.model.startswith("gemini/"):
@@ -1474,6 +1531,15 @@ async def create_message(
                 'usage': { 'prompt_tokens': 0, 'completion_tokens': 0 }
             }
             anthropic_response = convert_openai_to_anthropic(oai_like, request)
+            
+            # Log successful Gemini response
+            logger.info(f"✅ GEMINI RESPONSE SENT:")
+            logger.info(f"   Model: {anthropic_response.model}")
+            logger.info(f"   Content Blocks: {len(anthropic_response.content)}")
+            logger.info(f"   Stop Reason: {anthropic_response.stop_reason}")
+            logger.info(f"   Input Tokens: {anthropic_response.usage.input_tokens}")
+            logger.info(f"   Output Tokens: {anthropic_response.usage.output_tokens}")
+            
             return anthropic_response
 
         else:
@@ -1521,8 +1587,17 @@ async def count_tokens(
     raw_request: Request
 ):
     try:
-        # Log the incoming token count request
+        # Log incoming token count request details
+        client_ip = raw_request.client.host if raw_request.client else "unknown"
+        user_agent = raw_request.headers.get("user-agent", "unknown")
         original_model = request.original_model or request.model
+        
+        logger.info(f"🔢 TOKEN COUNT REQUEST:")
+        logger.info(f"   IP: {client_ip}")
+        logger.info(f"   User-Agent: {user_agent}")
+        logger.info(f"   Model: {original_model}")
+        logger.info(f"   Messages: {len(request.messages)}")
+        logger.info(f"   Tools: {len(request.tools) if request.tools else 0}")
         
         # Get the display name for logging, just the model name without provider prefix
         display_model = original_model
