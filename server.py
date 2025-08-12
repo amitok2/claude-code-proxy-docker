@@ -135,6 +135,13 @@ def clean_gemini_schema(schema: Any) -> Any:
         schema.pop("title", None)      # Remove title field that causes "Unknown field for Schema" error
         schema.pop("examples", None)   # Remove examples field (also likely unsupported)
         schema.pop("const", None)      # Remove const field (also likely unsupported)
+        schema.pop("anyOf", None)      # Remove anyOf field that causes "Unknown field for Schema" error
+        schema.pop("oneOf", None)      # Remove oneOf field (also likely unsupported)
+        schema.pop("allOf", None)      # Remove allOf field (also likely unsupported)
+        schema.pop("not", None)        # Remove not field (also likely unsupported)
+        schema.pop("if", None)         # Remove if field (also likely unsupported)
+        schema.pop("then", None)       # Remove then field (also likely unsupported)
+        schema.pop("else", None)       # Remove else field (also likely unsupported)
         # Keep enum as it might be supported, keep description at property level
 
         # Check for unsupported 'format' in string types
@@ -152,9 +159,13 @@ def clean_gemini_schema(schema: Any) -> Any:
     return schema
 
 # Models for Anthropic API requests
+class CacheControl(BaseModel):
+    type: Literal["ephemeral"]
+
 class ContentBlockText(BaseModel):
     type: Literal["text"]
     text: str
+    cache_control: Optional[CacheControl] = None
 
 class ContentBlockImage(BaseModel):
     type: Literal["image"]
@@ -174,6 +185,7 @@ class ContentBlockToolResult(BaseModel):
 class SystemContent(BaseModel):
     type: Literal["text"]
     text: str
+    cache_control: Optional[CacheControl] = None
 
 class Message(BaseModel):
     role: Literal["user", "assistant"] 
