@@ -150,6 +150,21 @@ def clean_gemini_schema(schema: Any) -> Any:
             if schema["format"] not in allowed_formats:
                 schema.pop("format")
 
+        # Validate required fields - remove any required fields that don't exist in properties
+        if "required" in schema and "properties" in schema:
+            valid_required = []
+            properties = schema.get("properties", {})
+            for field_name in schema["required"]:
+                if field_name in properties:
+                    valid_required.append(field_name)
+                else:
+                    print(f"Warning: Removing required field '{field_name}' that doesn't exist in properties")
+            schema["required"] = valid_required
+            
+            # If no required fields remain, remove the required array
+            if not schema["required"]:
+                schema.pop("required", None)
+
         # Recursively clean nested schemas (properties, items, etc.)
         for key, value in list(schema.items()): # Use list() to allow modification during iteration
             schema[key] = clean_gemini_schema(value)
