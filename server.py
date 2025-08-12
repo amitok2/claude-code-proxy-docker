@@ -98,22 +98,39 @@ OPENAI_MODELS = [
 
 # List of Gemini models
 GEMINI_MODELS = [
-    "gemini-2.5-pro",
+    "gemini-2.5-pro",  # GA version - stable but has aggressive safety filtering
     "gemini-2.5-pro-preview-06-05",  # Latest preview version (available until July 15, 2025)
-    "gemini-2.0-flash",
-    "gemini-2.5-pro-preview-05-06"
-    # Note: gemini-2.5-pro-preview-05-06 was discontinued on July 15, 2025
-    # Note: gemini-2.5-pro-exp-03-25 was experimental and discontinued on July 15, 2025
+    "gemini-2.0-flash",  # Recommended - stable and reliable
+    "gemini-2.0-flash-exp"
+    # DISCONTINUED MODELS (will cause 404 errors):
+    # - gemini-2.5-pro-preview-05-06 (discontinued July 15, 2025)
+    # - gemini-2.5-pro-preview-03-25 (discontinued July 15, 2025) 
+    # - gemini-2.5-pro-exp-03-25 (experimental, discontinued July 15, 2025)
 ]
 
 # Helper function to clean schema for Gemini
 def clean_gemini_schema(schema: Any) -> Any:
-    """Recursively removes unsupported fields   from a JSON schema for Gemini."""
+    """Recursively removes unsupported fields from a JSON schema for Gemini."""
+    import copy
+    
+    # Make a deep copy to avoid modifying the original schema
+    if isinstance(schema, (dict, list)):
+        schema = copy.deepcopy(schema)
+    
     if isinstance(schema, dict):
         # Remove specific keys unsupported by Gemini tool parameters
         schema.pop("additionalProperties", None)
         schema.pop("default", None)
         schema.pop("$schema", None)  # Remove $schema field that causes "Unknown field for Schema" error
+        schema.pop("minItems", None)  # Remove minItems field that causes "Unknown field for Schema" error
+        schema.pop("maxItems", None)  # Remove maxItems field (also likely unsupported)
+        schema.pop("minLength", None)  # Remove minLength field (also likely unsupported) 
+        schema.pop("maxLength", None)  # Remove maxLength field (also likely unsupported)
+        schema.pop("pattern", None)    # Remove pattern field (also likely unsupported)
+        schema.pop("minimum", None)    # Remove minimum field (also likely unsupported)
+        schema.pop("maximum", None)    # Remove maximum field (also likely unsupported)
+        schema.pop("multipleOf", None) # Remove multipleOf field (also likely unsupported)
+        schema.pop("uniqueItems", None) # Remove uniqueItems field (also likely unsupported)
 
         # Check for unsupported 'format' in string types
         if schema.get("type") == "string" and "format" in schema:
