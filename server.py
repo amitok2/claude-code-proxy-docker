@@ -108,11 +108,12 @@ GEMINI_MODELS = [
 
 # Helper function to clean schema for Gemini
 def clean_gemini_schema(schema: Any) -> Any:
-    """Recursively removes unsupported fields from a JSON schema for Gemini."""
+    """Recursively removes unsupported fields   from a JSON schema for Gemini."""
     if isinstance(schema, dict):
         # Remove specific keys unsupported by Gemini tool parameters
         schema.pop("additionalProperties", None)
         schema.pop("default", None)
+        schema.pop("$schema", None)  # Remove $schema field that causes "Unknown field for Schema" error
 
         # Check for unsupported 'format' in string types
         if schema.get("type") == "string" and "format" in schema:
