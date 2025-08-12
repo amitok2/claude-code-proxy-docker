@@ -7,13 +7,15 @@ from typing import List, Dict, Any, Optional, Union, Literal
 import httpx
 import os
 from fastapi.responses import JSONResponse, StreamingResponse
-import litellm
 import uuid
 import time
 from dotenv import load_dotenv
 import re
 from datetime import datetime
 import sys
+from openai import OpenAI, AsyncOpenAI
+import google.generativeai as genai
+import tiktoken
 
 # Load environment variables from .env file
 load_dotenv()
@@ -96,8 +98,12 @@ OPENAI_MODELS = [
 
 # List of Gemini models
 GEMINI_MODELS = [
-    "gemini-2.5-pro-preview-03-25",
-    "gemini-2.0-flash"
+    "gemini-2.5-pro",
+    "gemini-2.5-pro-preview-06-05",  # Latest preview version (available until July 15, 2025)
+    "gemini-2.0-flash",
+    "gemini-2.5-pro-preview-05-06"
+    # Note: gemini-2.5-pro-preview-05-06 was discontinued on July 15, 2025
+    # Note: gemini-2.5-pro-exp-03-25 was experimental and discontinued on July 15, 2025
 ]
 
 # Helper function to clean schema for Gemini
@@ -357,10 +363,26 @@ def parse_tool_result_content(content):
     except:
         return "Unparseable content"
 
-def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str, Any]:
-    """Convert Anthropic API request format to LiteLLM format (which follows OpenAI)."""
-    # LiteLLM already handles Anthropic models when using the format model="anthropic/claude-3-opus-20240229"
-    # So we just need to convert our Pydantic model to a dict in the expected format
+def convert_anthropic_to_openai(anthropic_request: MessagesRequest) -> Dict[str, Any]:
+    """Convert Anthropic-style request to OpenAI Chat Completions compatible dict."""
+    # Reuse existing converter, then sanitize
+    converted = convert_anthropic_to_openai_base(anthropic_request)
+    # Normalize model to provider-native string
+    model = converted.get("model", "")
+    if isinstance(model, str):
+        for prefix in ("openai/", "gemini/", "anthropic/"):
+            if model.startswith(prefix):
+                model = model[len(prefix):]
+                break
+        converted["model"] = model
+    # Remove intermediary-only keys
+    for k in ["max_output_tokens", "generation_config", "safety_settings", "api_key"]:
+        if k in converted:
+            converted.pop(k, None)
+    return converted
+
+def convert_anthropic_to_openai_base(anthropic_request: MessagesRequest) -> Dict[str, Any]:
+    """Convert Anthropic API request format to OpenAI Chat Completions format."""
     
     messages = []
     
@@ -494,9 +516,9 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
     if anthropic_request.model.startswith("openai/") or anthropic_request.model.startswith("gemini/"):
         max_tokens = min(max_tokens, 16384)
     
-    # Create LiteLLM request dict
-    litellm_request = {
-        "model": anthropic_request.model,  # t understands "anthropic/claude-x" format
+    # Create OpenAI-style request dict
+    openai_request = {
+        "model": anthropic_request.model,
         "messages": messages,
         "max_tokens": max_tokens,
         "temperature": anthropic_request.temperature,
@@ -506,16 +528,16 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
     # Add conversation-specific parameters for Gemini models
     if anthropic_request.model.startswith("gemini/"):
         # Try to override Gemini's default turn limits with additional parameters
-        litellm_request["max_output_tokens"] = max_tokens
+        openai_request["max_output_tokens"] = max_tokens
         
         # Add Gemini-specific generation config parameters
-        litellm_request["generation_config"] = {
+        openai_request["generation_config"] = {
             "max_output_tokens": max_tokens,
             "candidate_count": 1,
         }
         
         # Add safety settings to potentially avoid restrictions
-        litellm_request["safety_settings"] = [
+        openai_request["safety_settings"] = [
             {
                 "category": "HARM_CATEGORY_HARASSMENT",
                 "threshold": "BLOCK_ONLY_HIGH"
@@ -538,20 +560,26 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
     
     # Add optional parameters if present
     if anthropic_request.stop_sequences:
-        litellm_request["stop"] = anthropic_request.stop_sequences
+        openai_request["stop"] = anthropic_request.stop_sequences
     
     if anthropic_request.top_p:
-        litellm_request["top_p"] = anthropic_request.top_p
+        openai_request["top_p"] = anthropic_request.top_p
     
     if anthropic_request.top_k:
-        litellm_request["top_k"] = anthropic_request.top_k
+        openai_request["top_k"] = anthropic_request.top_k
 
     # Sanitize unsupported params for OpenAI gpt-5 models
     try:
-        target_model = litellm_request.get("model", "")
+        target_model = openai_request.get("model", "")
         if isinstance(target_model, str) and (target_model == "gpt-5" or target_model.endswith("/gpt-5") or "gpt-5" in target_model):
             # gpt-5 only supports temperature=1; force it and drop conflicting params
-            litellm_request["temperature"] = 1
+            openai_request["temperature"] = 1
+            
+            # gpt-5 uses max_completion_tokens instead of max_tokens
+            if "max_tokens" in openai_request:
+                openai_request["max_completion_tokens"] = openai_request["max_tokens"]
+                del openai_request["max_tokens"]
+            
             for unsupported in [
                 "top_p",
                 "top_k",
@@ -560,8 +588,8 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
                 "seed",
                 "response_format",
             ]:
-                if unsupported in litellm_request:
-                    del litellm_request[unsupported]
+                if unsupported in openai_request:
+                    del openai_request[unsupported]
     except Exception:
         pass
     
@@ -598,7 +626,7 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
             }
             openai_tools.append(openai_tool)
 
-        litellm_request["tools"] = openai_tools
+        openai_request["tools"] = openai_tools
     
     # Convert tool_choice to OpenAI format if present
     if anthropic_request.tool_choice:
@@ -610,23 +638,23 @@ def convert_anthropic_to_litellm(anthropic_request: MessagesRequest) -> Dict[str
         # Handle Anthropic's tool_choice format
         choice_type = tool_choice_dict.get("type")
         if choice_type == "auto":
-            litellm_request["tool_choice"] = "auto"
+            openai_request["tool_choice"] = "auto"
         elif choice_type == "any":
-            litellm_request["tool_choice"] = "any"
+            openai_request["tool_choice"] = "required"  # OpenAI uses "required" instead of "any"
         elif choice_type == "tool" and "name" in tool_choice_dict:
-            litellm_request["tool_choice"] = {
+            openai_request["tool_choice"] = {
                 "type": "function",
                 "function": {"name": tool_choice_dict["name"]}
             }
         else:
             # Default to auto if we can't determine
-            litellm_request["tool_choice"] = "auto"
+            openai_request["tool_choice"] = "auto"
     
-    return litellm_request
+    return openai_request
 
-def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any], 
-                                 original_request: MessagesRequest) -> MessagesResponse:
-    """Convert LiteLLM (OpenAI format) response to Anthropic API response format."""
+def convert_openai_to_anthropic(openai_response: Union[Dict[str, Any], Any], 
+                                original_request: MessagesRequest) -> MessagesResponse:
+    """Convert OpenAI-format response to Anthropic API response format."""
     
     # Enhanced response extraction with better error handling
     try:
@@ -640,31 +668,31 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
         # Check if this is a Claude model (which supports content blocks)
         is_claude_model = clean_model.startswith("claude-")
         
-        # Handle ModelResponse object from LiteLLM
-        if hasattr(litellm_response, 'choices') and hasattr(litellm_response, 'usage'):
+        # Handle response object (OpenAI SDK format)
+        if hasattr(openai_response, 'choices') and hasattr(openai_response, 'usage'):
             # Extract data from ModelResponse object directly
-            choices = litellm_response.choices
+            choices = openai_response.choices
             message = choices[0].message if choices and len(choices) > 0 else None
             content_text = message.content if message and hasattr(message, 'content') else ""
             tool_calls = message.tool_calls if message and hasattr(message, 'tool_calls') else None
             finish_reason = choices[0].finish_reason if choices and len(choices) > 0 else "stop"
-            usage_info = litellm_response.usage
-            response_id = getattr(litellm_response, 'id', f"msg_{uuid.uuid4()}")
+            usage_info = openai_response.usage
+            response_id = getattr(openai_response, 'id', f"msg_{uuid.uuid4()}")
         else:
             # For backward compatibility - handle dict responses
             # If response is a dict, use it, otherwise try to convert to dict
             try:
-                response_dict = litellm_response if isinstance(litellm_response, dict) else litellm_response.dict()
+                response_dict = openai_response if isinstance(openai_response, dict) else openai_response.dict()
             except AttributeError:
                 # If .dict() fails, try to use model_dump or __dict__ 
                 try:
-                    response_dict = litellm_response.model_dump() if hasattr(litellm_response, 'model_dump') else litellm_response.__dict__
+                    response_dict = openai_response.model_dump() if hasattr(openai_response, 'model_dump') else openai_response.__dict__
                 except AttributeError:
                     # Fallback - manually extract attributes
                     response_dict = {
-                        "id": getattr(litellm_response, 'id', f"msg_{uuid.uuid4()}"),
-                        "choices": getattr(litellm_response, 'choices', [{}]),
-                        "usage": getattr(litellm_response, 'usage', {})
+                        "id": getattr(openai_response, 'id', f"msg_{uuid.uuid4()}"),
+                        "choices": getattr(openai_response, 'choices', [{}]),
+                        "usage": getattr(openai_response, 'usage', {})
                     }
                     
             # Extract the content from the response dict
@@ -812,7 +840,7 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
         )
 
 async def handle_streaming(response_generator, original_request: MessagesRequest):
-    """Handle streaming responses from LiteLLM and convert to Anthropic format."""
+    """Handle streaming responses from OpenAI SDK and convert to Anthropic format."""
     try:
         # Send message_start event
         message_id = f"msg_{uuid.uuid4().hex[:24]}"  # Format similar to Anthropic's IDs
@@ -1098,23 +1126,15 @@ async def create_message(
         elif clean_model.startswith("openai/"):
             clean_model = clean_model[len("openai/"):]
         
-        # Convert Anthropic request to LiteLLM format
-        litellm_request = convert_anthropic_to_litellm(request)
-        
-        # Determine which API key to use based on the model
-        if request.model.startswith("openai/"):
-            litellm_request["api_key"] = OPENAI_API_KEY
-        elif request.model.startswith("gemini/"):
-            litellm_request["api_key"] = GEMINI_API_KEY
-        else:
-            litellm_request["api_key"] = ANTHROPIC_API_KEY
+        # Convert Anthropic request to intermediary OpenAI-like dict
+        provider_request = convert_anthropic_to_openai_base(request)
         
         # For OpenAI models - modify request format to work with limitations
-        if "openai" in litellm_request["model"] and "messages" in litellm_request:
+        if request.model.startswith("openai/") and "messages" in provider_request:
             
             # For OpenAI models, we need to convert content blocks to simple strings
             # and handle other requirements
-            for i, msg in enumerate(litellm_request["messages"]):
+            for i, msg in enumerate(provider_request["messages"]):
                 # Special case - handle message content directly when it's a list of tool_result
                 # This is a specific case we're seeing in the error
                 if "content" in msg and isinstance(msg["content"], list):
@@ -1152,7 +1172,7 @@ async def create_message(
                                     all_text += str(result_content) + "\n"
                         
                         # Replace the list with extracted text
-                        litellm_request["messages"][i]["content"] = all_text.strip() or "..."
+                        provider_request["messages"][i]["content"] = all_text.strip() or "..."
                         continue  # Skip normal processing for this message
                 
                 # 1. Handle content field - normal case
@@ -1219,10 +1239,10 @@ async def create_message(
                         if not text_content.strip():
                             text_content = "..."
                         
-                        litellm_request["messages"][i]["content"] = text_content.strip()
+                        provider_request["messages"][i]["content"] = text_content.strip()
                     # Also check for None or empty string content
                     elif msg["content"] is None:
-                        litellm_request["messages"][i]["content"] = "..." # Empty content not allowed
+                        provider_request["messages"][i]["content"] = "..." # Empty content not allowed
                 
                 # 2. Remove any fields OpenAI doesn't support in messages
                 for key in list(msg.keys()):
@@ -1230,54 +1250,216 @@ async def create_message(
                         del msg[key]
             
             # 3. Final validation - check for any remaining invalid values
-            for i, msg in enumerate(litellm_request["messages"]):
+            for i, msg in enumerate(provider_request["messages"]):
                 # If content is still a list or None, replace with placeholder
                 if isinstance(msg.get("content"), list):
                     # Last resort - stringify the entire content as JSON
-                    litellm_request["messages"][i]["content"] = f"Content as JSON: {json.dumps(msg.get('content'))}"
+                    provider_request["messages"][i]["content"] = f"Content as JSON: {json.dumps(msg.get('content'))}"
                 elif msg.get("content") is None:
-                    litellm_request["messages"][i]["content"] = "..." # Fallback placeholder
-        
-        # Handle streaming mode
-        if request.stream:
-            # Use LiteLLM for streaming
-            num_tools = len(request.tools) if request.tools else 0
+                    provider_request["messages"][i]["content"] = "..." # Fallback placeholder
+        # Direct provider calls
+        if request.model.startswith("openai/"):
+            if not OPENAI_API_KEY:
+                raise HTTPException(status_code=400, detail="Missing OPENAI_API_KEY")
+            # Build OpenAI params
+            oai_model = provider_request.get("model", "").replace("openai/", "")
+            oai_messages = provider_request.get("messages", [])
+            oai_params = {
+                "model": oai_model,
+                "messages": oai_messages,
+                "temperature": provider_request.get("temperature", 1.0),
+            }
             
+            # Handle gpt-5 parameter differences
+            if "max_completion_tokens" in provider_request:
+                oai_params["max_completion_tokens"] = provider_request["max_completion_tokens"]
+            elif "max_tokens" in provider_request:
+                oai_params["max_tokens"] = provider_request["max_tokens"]
+            if "tools" in provider_request:
+                oai_params["tools"] = provider_request["tools"]
+            if "tool_choice" in provider_request:
+                oai_params["tool_choice"] = provider_request["tool_choice"]
+
+            num_tools = len(request.tools) if request.tools else 0
             log_request_beautifully(
                 "POST", 
                 raw_request.url.path, 
                 display_model, 
-                litellm_request.get('model'),
-                len(litellm_request['messages']),
+                oai_model,
+                len(oai_messages),
                 num_tools,
-                200  # Assuming success at this point
+                200
             )
-            # Ensure we use the async version for streaming
-            response_generator = await litellm.acompletion(**litellm_request)
+
+            if request.stream:
+                aclient = AsyncOpenAI(api_key=OPENAI_API_KEY)
+                stream = await aclient.chat.completions.create(stream=True, **oai_params)
+                return StreamingResponse(
+                    handle_streaming(stream, request),
+                    media_type="text/event-stream"
+                )
+            else:
+                client = OpenAI(api_key=OPENAI_API_KEY)
+                resp = client.chat.completions.create(**oai_params)
+                
+
+                anthropic_response = convert_openai_to_anthropic(resp, request)
+                return anthropic_response
+
+        elif request.model.startswith("gemini/"):
+            if not GEMINI_API_KEY:
+                raise HTTPException(status_code=400, detail="Missing GEMINI_API_KEY")
+            genai.configure(api_key=GEMINI_API_KEY)
+            model_name = provider_request.get("model", "").replace("gemini/", "")
+
+            # Build conversation history for Gemini
+            history = []
+            sys_text = ""
+            if request.system:
+                if isinstance(request.system, str):
+                    sys_text = request.system
+                elif isinstance(request.system, list):
+                    for blk in request.system:
+                        if hasattr(blk, 'type') and blk.type == 'text':
+                            sys_text += blk.text + "\n\n"
+
+            for msg in request.messages:
+                role = "user" if msg.role == "user" else "model"
+                if isinstance(msg.content, str):
+                    txt = (sys_text + "\n\n" + msg.content).strip() if role == "user" and sys_text else msg.content
+                    history.append({"role": role, "parts": [txt]})
+                    sys_text = ""
+                else:
+                    text_content = ""
+                    for block in msg.content:
+                        if hasattr(block, 'type') and block.type == 'text':
+                            text_content += block.text + "\n"
+                        elif hasattr(block, 'type') and block.type == 'tool_result':
+                            tool_id = getattr(block, 'tool_use_id', 'unknown')
+                            parsed = parse_tool_result_content(getattr(block, 'content', ''))
+                            text_content += f"[Tool Result ID: {tool_id}]\n{parsed}\n"
+                    text_content = text_content.strip() or "..."
+                    if role == "user" and sys_text:
+                        text_content = sys_text + "\n\n" + text_content
+                        sys_text = ""
+                    history.append({"role": role, "parts": [text_content]})
+
+            # Tools
+            tools_cfg = None
+            if request.tools:
+                function_declarations = []
+                for t in request.tools:
+                    tdict = t.dict() if hasattr(t, 'dict') else t
+                    input_schema = tdict.get('input_schema', {})
+                    function_declarations.append({
+                        'name': tdict['name'],
+                        'description': tdict.get('description', ''),
+                        'parameters': clean_gemini_schema(input_schema)
+                    })
+                tools_cfg = { 'function_declarations': function_declarations }
+
+            generation_config = {
+                'temperature': request.temperature,
+                'max_output_tokens': min(request.max_tokens, 16384)
+            }
+
+            model = genai.GenerativeModel(model_name, tools=tools_cfg)
+
+            if request.stream:
+                try:
+                    stream = model.generate_content(history, generation_config=generation_config, stream=True)
+
+                    async def gemini_stream():
+                        message_id = f"msg_{uuid.uuid4().hex[:24]}"
+                        message_data = {
+                            'type': 'message_start',
+                            'message': {
+                                'id': message_id,
+                                'type': 'message',
+                                'role': 'assistant',
+                                'model': request.model,
+                                'content': [],
+                                'stop_reason': None,
+                                'stop_sequence': None,
+                                'usage': {
+                                    'input_tokens': 0,
+                                    'cache_creation_input_tokens': 0,
+                                    'cache_read_input_tokens': 0,
+                                    'output_tokens': 0
+                                }
+                            }
+                        }
+                        yield f"event: message_start\ndata: {json.dumps(message_data)}\n\n"
+                        yield f"event: content_block_start\ndata: {json.dumps({'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}})}\n\n"
+                        yield f"event: ping\ndata: {json.dumps({'type': 'ping'})}\n\n"
+
+                        for chunk in stream:
+                            try:
+                                delta_text = getattr(chunk, 'text', None)
+                                if isinstance(delta_text, str) and delta_text:
+                                    yield f"event: content_block_delta\ndata: {json.dumps({'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': delta_text}})}\n\n"
+                            except Exception:
+                                continue
+
+                        yield f"event: content_block_stop\ndata: {json.dumps({'type': 'content_block_stop', 'index': 0})}\n\n"
+                        yield f"event: message_delta\ndata: {json.dumps({'type': 'message_delta', 'delta': {'stop_reason': 'end_turn', 'stop_sequence': None}, 'usage': {'output_tokens': 0}})}\n\n"
+                        yield f"event: message_stop\ndata: {json.dumps({'type': 'message_stop'})}\n\n"
+                        yield "data: [DONE]\n\n"
+
+                    return StreamingResponse(gemini_stream(), media_type="text/event-stream")
+                except Exception:
+                    # Fallback to non-streaming
+                    pass
+
+            resp = model.generate_content(history, generation_config=generation_config)
             
-            return StreamingResponse(
-                handle_streaming(response_generator, request),
-                media_type="text/event-stream"
-            )
-        else:
-            # Use LiteLLM for regular completion
-            num_tools = len(request.tools) if request.tools else 0
+            # Handle Gemini response with proper safety and candidate checks
+            text = ""
+            if hasattr(resp, 'candidates') and resp.candidates:
+                candidate = resp.candidates[0]
+                finish_reason = getattr(candidate, 'finish_reason', None)
+                
+                # Gemini finish_reason values:
+                # 1 = STOP (normal completion)
+                # 2 = SAFETY (blocked for safety)
+                # 3 = MAX_TOKENS (hit token limit)
+                # 4 = RECITATION (blocked for recitation)
+                # 5 = OTHER (other reason)
+                
+                if finish_reason == 1:  # STOP - normal completion
+                    try:
+                        text = resp.text if hasattr(resp, 'text') else ''
+                    except Exception:
+                        # Even with STOP, sometimes response.text fails
+                        if hasattr(candidate, 'content') and hasattr(candidate.content, 'parts'):
+                            parts = candidate.content.parts
+                            text = ''.join([part.text for part in parts if hasattr(part, 'text')])
+                        else:
+                            text = "[Could not extract text from response]"
+                elif finish_reason == 2:  # SAFETY
+                    text = "[Response blocked for safety reasons]"
+                elif finish_reason == 3:  # MAX_TOKENS
+                    text = "[Response truncated - maximum tokens reached]"
+                elif finish_reason == 4:  # RECITATION
+                    text = "[Response blocked due to recitation policy]"
+                else:
+                    text = f"[Response unavailable - finish_reason: {finish_reason}]"
+            else:
+                text = "[No candidates in response]"
             
-            log_request_beautifully(
-                "POST", 
-                raw_request.url.path, 
-                display_model, 
-                litellm_request.get('model'),
-                len(litellm_request['messages']),
-                num_tools,
-                200  # Assuming success at this point
-            )
-            litellm_response = litellm.completion(**litellm_request)
-            
-            # Convert LiteLLM response to Anthropic format
-            anthropic_response = convert_litellm_to_anthropic(litellm_response, request)
-            
+            oai_like = {
+                'id': f"msg_{uuid.uuid4()}",
+                'choices': [{
+                    'message': { 'content': text, 'tool_calls': None },
+                    'finish_reason': 'stop'
+                }],
+                'usage': { 'prompt_tokens': 0, 'completion_tokens': 0 }
+            }
+            anthropic_response = convert_openai_to_anthropic(oai_like, request)
             return anthropic_response
+
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported model provider. Use openai/ or gemini/ prefixed models.")
                 
     except Exception as e:
         import traceback
@@ -1336,8 +1518,8 @@ async def count_tokens(
         elif clean_model.startswith("openai/"):
             clean_model = clean_model[len("openai/"):]
         
-        # Convert the messages to a format LiteLLM can understand
-        converted_request = convert_anthropic_to_litellm(
+        # Convert the messages to a provider-neutral OpenAI-like format
+        converted_request = convert_anthropic_to_openai(
             MessagesRequest(
                 model=request.model,
                 max_tokens=100,  # Arbitrary value not used for token counting
@@ -1348,38 +1530,31 @@ async def count_tokens(
                 thinking=request.thinking
             )
         )
-        
-        # Use LiteLLM's token_counter function
+
+        # Token counting via tiktoken approximate
         try:
-            # Import token_counter function
-            from litellm import token_counter
-            
-            # Log the request beautifully
+            model_name = converted_request.get('model', '')
+            messages = converted_request.get('messages', [])
+            text = "\n".join([m.get('content', '') if isinstance(m.get('content'), str) else json.dumps(m.get('content')) for m in messages])
+            try:
+                enc = tiktoken.encoding_for_model(model_name)
+            except Exception:
+                enc = tiktoken.get_encoding('cl100k_base')
+            token_count = len(enc.encode(text))
+
             num_tools = len(request.tools) if request.tools else 0
-            
             log_request_beautifully(
                 "POST",
                 raw_request.url.path,
                 display_model,
-                converted_request.get('model'),
-                len(converted_request['messages']),
+                model_name,
+                len(messages),
                 num_tools,
-                200  # Assuming success at this point
+                200
             )
-            
-            # Count tokens
-            token_count = token_counter(
-                model=converted_request["model"],
-                messages=converted_request["messages"],
-            )
-            
-            # Return Anthropic-style response
             return TokenCountResponse(input_tokens=token_count)
-            
-        except ImportError:
-            logger.error("Could not import token_counter from litellm")
-            # Fallback to a simple approximation
-            return TokenCountResponse(input_tokens=1000)  # Default fallback
+        except Exception:
+            return TokenCountResponse(input_tokens=1000)
             
     except Exception as e:
         import traceback
@@ -1389,7 +1564,7 @@ async def count_tokens(
 
 @app.get("/")
 async def root():
-    return {"message": "Anthropic Proxy for LiteLLM"}
+    return {"message": "Anthropic-compatible proxy (OpenAI + Google Gemini)"}
 
 # Define ANSI color codes for terminal output
 class Colors:
