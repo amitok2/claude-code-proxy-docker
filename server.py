@@ -109,6 +109,7 @@ OPENAI_MODELS = [
 # List of Gemini models
 GEMINI_MODELS = [
     "gemini-2.5-pro-preview-03-25",
+    "gemini-2.5-pro",
     "gemini-2.0-flash"
 ]
 
@@ -628,9 +629,11 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
             clean_model = clean_model[len("anthropic/"):]
         elif clean_model.startswith("openai/"):
             clean_model = clean_model[len("openai/"):]
+        elif clean_model.startswith("gemini/"):
+            clean_model = clean_model[len("gemini/"):]
         
-        # Check if this is a Claude model (which supports content blocks)
-        is_claude_model = clean_model.startswith("claude-")
+        # Check if this model supports content blocks (Claude and Gemini models do)
+        is_content_block_model = clean_model.startswith("claude-") or clean_model.startswith("gemini-")
         
         # Handle ModelResponse object from LiteLLM
         if hasattr(litellm_response, 'choices') and hasattr(litellm_response, 'usage'):
@@ -675,8 +678,8 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
         if content_text is not None and content_text != "":
             content.append({"type": "text", "text": content_text})
         
-        # Add tool calls if present (tool_use in Anthropic format) - only for Claude models
-        if tool_calls and is_claude_model:
+        # Add tool calls if present (tool_use in Anthropic format) - for Claude and Gemini models
+        if tool_calls and is_content_block_model:
             logger.debug(f"Processing tool calls: {tool_calls}")
             
             # Convert to list if it's not already
@@ -714,9 +717,9 @@ def convert_litellm_to_anthropic(litellm_response: Union[Dict[str, Any], Any],
                     "name": name,
                     "input": arguments
                 })
-        elif tool_calls and not is_claude_model:
-            # For non-Claude models, convert tool calls to text format
-            logger.debug(f"Converting tool calls to text for non-Claude model: {clean_model}")
+        elif tool_calls and not is_content_block_model:
+            # For models that don't support content blocks, convert tool calls to text format
+            logger.debug(f"Converting tool calls to text for model: {clean_model}")
             
             # We'll append tool info to the text content
             tool_text = "\n\nTool usage:\n"
@@ -1097,6 +1100,8 @@ async def create_message(
             clean_model = clean_model[len("anthropic/"):]
         elif clean_model.startswith("openai/"):
             clean_model = clean_model[len("openai/"):]
+        elif clean_model.startswith("gemini/"):
+            clean_model = clean_model[len("gemini/"):]
         
         logger.debug(f"📊 PROCESSING REQUEST: Model={request.model}, Stream={request.stream}")
         
@@ -1354,6 +1359,8 @@ async def count_tokens(
             clean_model = clean_model[len("anthropic/"):]
         elif clean_model.startswith("openai/"):
             clean_model = clean_model[len("openai/"):]
+        elif clean_model.startswith("gemini/"):
+            clean_model = clean_model[len("gemini/"):]
         
         # Convert the messages to a format LiteLLM can understand
         converted_request = convert_anthropic_to_litellm(
